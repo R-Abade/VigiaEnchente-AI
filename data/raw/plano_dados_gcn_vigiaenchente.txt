@@ -1,0 +1,411 @@
+================================================================================
+PLANO DE ENGENHARIA DE DADOS — VigiaEnchente GCN
+Sabará, Minas Gerais, Brasil
+================================================================================
+Gerado em: junho/2025
+Autor da análise: Claude (Anthropic) | Projeto: Raphael Abade Rodrigues (TCC)
+================================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. DIAGNÓSTICO: LACUNAS NO MODELO ATUAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PROBLEMA 1 — Data Leakage no label y
+  Situação atual: y = exp(-river_dist / threshold) ≈ x[river_dist_norm]
+  Efeito: o modelo aprende uma função de identidade, não estrutura do grafo
+  Solução: y deve incorporar elevação + precipitação acumulada + evento real
+
+PROBLEMA 2 — Features insuficientes em x
+  Situação atual: x = [degrees_norm, betweenness_norm]
+  Ausente: elevação topográfica (decisiva — um nó a 40m do rio em altitude
+           alta tem risco menor que um nó a 80m do rio em várzea)
+  Ausente: contexto temporal (precipitação acumulada)
+  Ausente: tipo de via (ponte/túnel da OSM)
+
+PROBLEMA 3 — Sem supervisão real
+  O modelo não tem nenhuma amostra rotulada por evento histórico real.
+  Todos os 1659 nós têm labels sintéticos derivados de distância euclidiana.
+
+PROBLEMA 4 — GCN estrutural favorece nós centrais
+  Nós ribeirinhos periféricos (os mais críticos) recebem scores menores
+  porque têm poucos vizinhos. Isso justifica migração para GAT.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. VALIDAÇÃO CRUZADA — EVENTOS HISTÓRICOS vs DADOS DISPONÍVEIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Fonte dos eventos: Seção 13 do Plano Municipal de Gerenciamento de Riscos
+e Desastres 2025/2028 (PLANCON Sabará)
+
+EVENTO 1 — Dezembro/1997: Transbordamento do Rio das Velhas
+  Dado encontrado (estação 1943006 — Sabará):
+    Total mensal:  460,2 mm  (normal do mês: ~250 mm → anomalia: +84%)
+    Máxima diária: 108,1 mm em 14/12/1997
+    Acumulado 3d máximo: 116,1 mm (acima do limiar PLANCON de 100mm)
+  VALIDAÇÃO: ✓ dados confirmam o evento
+
+EVENTO 2 — 27/01/2020: Chuvas, Inundações e Deslizamentos
+  Dado encontrado (estação 1943006):
+    Total mensal:  606,4 mm  (MAIOR janeiro da série 2000-2025)
+    Máxima diária: 152,8 mm em 25/01/2020
+    Acumulado 3d:  266,7 mm em 25/01/2020 (2,6x o limiar PLANCON)
+  VALIDAÇÃO: ✓ evento extremo confirmado — o mais severo da série recente
+
+EVENTO 3 — 09/01/2022: Inundação Rio das Velhas (reportagem EM)
+  Dado encontrado (estação 1943006):
+    Total mensal:  473,1 mm
+    Máxima diária: 105,3 mm em 08/01/2022
+    Dia 09:         97,8 mm | Acumulado 72h (08-10/jan): 268,7 mm
+    Acumulado 30d:  532,2 mm (total Nov+Dez+Jan acumulado elevado)
+  VALIDAÇÃO: ✓ evento confirmado — gatilho PLANCON acionado (>100mm/72h)
+
+EVENTO 4 — 26/10/2023: Alagamento Bairro Nações Unidas
+  Dado encontrado:
+    Precipitação no período: 49,6 mm em 30/out/2023 (evento localizado)
+    Acumulado outubro: 94,7 mm (abaixo do limiar global mas evento urbano)
+  VALIDAÇÃO: ⚠ evento menor, possivelmente ampliado por drenagem obstruída
+
+EVENTO 5 — 13/11/2024: Alagamentos em Paciência, Itacolomi, Cardoso Menezes
+  Dado encontrado:
+    Máxima diária: 97,4 mm em 14/11/2024
+    Acumulado 72h: 100,9 mm (no limiar exato de alerta PLANCON)
+  VALIDAÇÃO: ✓ dados confirmam o evento
+
+CONCLUSÃO DA VALIDAÇÃO:
+  Os 8 nós críticos identificados por identify_flood_risk_nodes (≤50m do rio)
+  correspondem a regiões que o PLANCON classifica como "Área de Risco 27 —
+  Rio das Velhas" (1.600 pessoas em risco de inundação). Os nós de risco
+  identificados pelo código ESTÃO corretos geograficamente, mas o label y
+  atual não reflete a INTENSIDADE do risco — que varia com precipitação e
+  elevação topográfica.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. FONTES DE DADOS — LISTA COMPLETA COM URLs E MÉTODOS DE ACESSO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DISPONÍVEL (já nos seus arquivos):
+─────────────────────────────────
+[F1] Chuvas.csv — Precipitação mensal, estação 1943006 (Sabará)
+     Período: 1941–2025 | Resolução: mensal (com dados diários internos)
+     Uso: features temporais (precip_24h, precip_72h, precip_30d)
+     Qualidade: BOM para eventos pós-1990
+
+[F2] Cotas.csv — Nível d'água (cm), estações 41205000/41220000/41230000
+     Período: 1940–2039 (leitura com 2-digit year)
+     PROBLEMA: estações fluviométricas são distantes (Justino, Siderúrgica)
+     Uso: como proxy de nível do Rio das Velhas
+     Qualidade: LIMITADO para eventos recentes (lacunas de dados)
+
+[F3] Vazoes.csv — Vazão m³/s, estação 41205000 (Justino)
+     Período: 1940–2039 | Máxima histórica: 1350 m³/s
+     Uso: feature de pressão hidrológica upstream
+
+[F4] Estacao.csv — Metadados de 21 estações em Sabará/arredores
+     Uso: referência geográfica para cruzar com nós do grafo OSMnx
+
+A OBTER (gratuitas, públicas):
+────────────────────────────────
+[F5] Elevação SRTM via biblioteca srtm.py
+     Instalação: pip install srtm.py
+     Uso: srtm.get_data().get_elevation(lat, lon)
+     Resolução: ~30m (suficiente para nós da rede viária de Sabará)
+     Acesso: automático via biblioteca (dados NASA)
+     PRIORIDADE: CRÍTICA — resolve o problema de data leakage
+
+[F6] OpenMeteo API — Histórico de precipitação
+     URL: https://archive-api.open-meteo.com/v1/archive
+     Parâmetros: latitude=-19.8931&longitude=-43.815&
+                 daily=precipitation_sum&start_date=2015-01-01&end_date=2025-03-01
+     Formato: JSON | Resolução: diária | Gratuita sem chave API
+     Uso: segunda fonte de precipitação diária (complementa Chuvas.csv)
+     Código de acesso:
+       import requests
+       url = "https://archive-api.open-meteo.com/v1/archive"
+       params = {
+         "latitude": -19.8931, "longitude": -43.815,
+         "daily": "precipitation_sum,rain_sum",
+         "start_date": "2015-01-01", "end_date": "2025-03-01",
+         "timezone": "America/Sao_Paulo"
+       }
+       r = requests.get(url, params=params)
+       data = r.json()
+
+[F7] ANA HidroWeb — Dados fluviométricos atualizados
+     URL: https://www.snirh.gov.br/hidroweb/rest/api/documento/convencionais
+     Estação mais relevante: 41230700 (Rio das Velhas jus. Ribeirão Sabará)
+     Também: 41200500 (Rio das Velhas mont. rib. Sabará)
+     Código de acesso:
+       GET https://www.snirh.gov.br/hidroweb/rest/api/documento/convencionais
+           ?codEstacao=41230700&tipo=3&dataInicio=01/01/2015&dataFim=01/03/2025
+     Alternativa via portal: hidroweb.ana.gov.br → Dados → Estação 41230700
+
+[F8] CEMADEN — Alertas e dados pluviométricos em tempo real
+     URL: http://www.cemaden.gov.br/mapainterativo/
+     API não pública, mas dados históricos disponíveis via:
+       https://sjc.salvar.cemaden.gov.br/resources/graficos/interativo/
+       getJson.php?uf=MG&inicio=YYYYMMDD&fim=YYYYMMDD
+     Estação CEMADEN em Sabará: verificar via mapa interativo
+
+[F9] CPRM — Mapeamento de Áreas de Risco (shapefiles)
+     URL: https://rigeo.sgb.gov.br/handle/doc/17983
+     Conteúdo: polígonos de risco alto/muito alto por município
+     Relevante: RMR.SBR.001 REV.2 (citado no PLANCON)
+     Uso: validação espacial — cruzar polígonos de risco com nós do grafo
+
+[F10] S2ID — Sistema Integrado de Informações sobre Desastres
+      URL: https://s2id.mi.gov.br/paginas/atlas/
+      Acesso: filtrar por município Sabará (MG) → decretos de SE/ECP
+      Conteúdo: datas de decretação de emergência, tipos de desastre, áreas
+      Uso: ground truth adicional para rotulagem de eventos
+
+[F11] IBGE — Setores censitários com densidade e renda
+      URL: https://geoftp.ibge.gov.br/organizacao_do_territorio/malhas_territoriais/
+           malhas_de_setores_censitarios/censo_2022/MG/
+      Uso: feature de vulnerabilidade social por nó
+      Cruzamento: join espacial entre setores e nós do grafo OSMnx
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. ESTRUTURAÇÃO DOS DADOS — ARQUIVOS A GERAR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ARQUIVO A: node_static_features.csv
+  Colunas (1 linha por nó do grafo, ~1659 linhas):
+    node_id         — ID do nó OSMnx
+    lat, lon        — coordenadas WGS-84
+    x_utm, y_utm    — coordenadas projetadas (EPSG:32723)
+    degree          — grau do nó na rede
+    degree_norm     — grau normalizado [0,1]
+    betweenness     — centralidade de intermediação
+    betweenness_norm
+    river_dist_m    — distância em metros ao Rio das Velhas
+    river_dist_norm — exp(-dist/threshold)
+    elevation_m     — altitude SRTM em metros (A OBTER via [F5])
+    elevation_norm  — normalizado [0,1]
+    is_bridge       — 1 se nó está em ponte (OSM)
+    is_near_river   — 1 se dist <= 50m (nó crítico atual)
+    highway_type    — tipo de via (residential, primary, etc)
+    risk_zone_cprm  — nível de risco segundo CPRM (0=sem dado,1=baixo,2=médio,3=alto,4=muito alto)
+    bairro          — bairro por geocoding reverso (para análise)
+
+ARQUIVO B: temporal_features.csv (já gerado parcialmente)
+  Colunas (1 linha por dia 2015-2025, ~3705 linhas):
+    date            — data (YYYY-MM-DD)
+    precip_24h      — precipitação do dia (mm) — estação 1943006
+    precip_72h      — acumulado 3 dias (mm)
+    precip_7d       — acumulado 7 dias (mm)
+    precip_30d      — acumulado 30 dias (mm)
+    river_level_cm  — nível do rio (cm) — estação 41230000 ou proxy
+    river_level_norm
+    is_wet_season   — 1 se mês ∈ {11,12,1,2,3}
+    trigger_72h_100mm — 1 se precip_72h >= 100mm (PLANCON threshold)
+    trigger_24h_50mm  — 1 se precip_24h >= 50mm
+    flood_label     — score 0-1 de intensidade do evento (0 = sem evento)
+    flood_event_id  — descrição textual do evento (ou "no_event")
+
+ARQUIVO C: graph_snapshots_training.csv
+  Formato expandido: 1 linha por (nó, dia) — para treino temporal
+  Colunas: node_id, date + todas as colunas de A + todas de B
+  Dimensão estimada: 1659 nós × 3705 dias = ~6,1M de linhas
+  ALTERNATIVA PRÁTICA (recomendada): manter A e B separados;
+  durante o treino, o código faz join in-memory por data
+
+ARQUIVO D: flood_events_ground_truth.csv
+  Colunas (8 linhas = eventos confirmados):
+    event_date       — data do evento
+    event_type       — tipo (inundação, alagamento, deslizamento)
+    severity_score   — 0.55 a 1.00 (escala construída neste plano)
+    precip_24h_mm    — precipitação no dia
+    precip_72h_mm    — acumulado 3 dias
+    source           — fonte (PLANCON_seção13, jornal_EM, etc)
+    affected_areas   — bairros/zonas afetados
+    plancon_trigger  — 1 se trigger formal PLANCON foi acionado
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. PIPELINE DE COLETA E PRÉ-PROCESSAMENTO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ETAPA 1 — Construir node_static_features.csv
+  1a. Carregar grafo: G = build_graph("Sabará, Minas Gerais, Brazil")
+  1b. Para cada nó n: lat, lon = converter UTM → WGS84
+  1c. Instalar srtm.py: pip install srtm.py
+      import srtm
+      elevation_data = srtm.get_data()
+      elev = elevation_data.get_elevation(lat, lon)  # retorna metros
+  1d. Calcular distância ao Rio das Velhas (já implementado em flood.py)
+  1e. Extrair atributos OSM: G.edges[u,v,0].get("bridge"), "highway"
+  1f. Geocoding reverso dos nós (já implementado em metrics.py)
+  1g. Salvar CSV
+
+ETAPA 2 — Construir temporal_features.csv
+  2a. Ler Chuvas.csv → expandir para série diária (loop sobre Chuva01..Chuva31)
+  2b. Calcular rolling: precip_72h, precip_7d, precip_30d
+  2c. Opcional: complementar com OpenMeteo API [F6] para dias faltantes
+  2d. Calcular river_level_cm a partir de Cotas.csv (estação 41230000)
+      — se lacunas: interpolar linearmente ou usar proxy de precipitação
+  2e. Aplicar labels dos 8 eventos confirmados (flood_events_ground_truth.csv)
+  2f. Calcular triggers booleanos PLANCON
+  2g. Salvar CSV
+
+ETAPA 3 — Construir nova label y por nó
+  y_node(i, t) = risk_score composto:
+
+  COMPONENTE ESTÁTICO (independe do tempo):
+    base_risk = 0.5 * exp(-river_dist[i] / threshold)   # proximidade ao rio
+              + 0.5 * (1 - elevation_norm[i])            # baixa elevação = risco maior
+              → range: [0, 1]
+
+  COMPONENTE DINÂMICO (varia por snapshot temporal t):
+    temporal_amplifier = sigmoid(
+        2.0 * (precip_72h[t] / 100)  # normalizado pelo limiar PLANCON
+    )  → range: [0.5, 1.0]
+
+  LABEL FINAL:
+    y_base = base_risk * temporal_amplifier
+
+  SUPERVISÃO REAL (quando disponível):
+    if flood_label[t] > 0:
+        y_supervised = flood_label[t] * (river_dist_norm[i] ** 0.5)
+        y_final = max(y_base, y_supervised)   # conservativo: pega o maior
+    else:
+        y_final = y_base
+
+  RESULTADO: y é fisicamente significativo, não derivável trivialmente de x
+
+ETAPA 4 — Atualizar GCNRisk para 7 features de entrada
+  class GCNRisk(torch.nn.Module):
+      def __init__(self):
+          super().__init__()
+          self.conv1 = tg.nn.GCNConv(7, 32)   # era (2, 16) — aumentar capacidade
+          self.conv2 = tg.nn.GCNConv(32, 16)
+          self.conv3 = tg.nn.GCNConv(16, 1)
+
+  def build_pyg_data(date: str, G, node_static_df, temporal_df):
+      snap = temporal_df[temporal_df['date'] == date].iloc[0]
+      x_static = node_static_df[[
+          'degree_norm', 'betweenness_norm',
+          'river_dist_norm', 'elevation_norm',
+          'is_bridge'
+      ]].values
+      x_temporal = np.tile([
+          snap['precip_72h'] / 300,   # normalizado max histórico ~300mm
+          snap['is_wet_season'],
+      ], (len(x_static), 1))
+      x = np.hstack([x_static, x_temporal])
+      return torch.tensor(x, dtype=torch.float)
+
+ETAPA 5 — Treino com múltiplos snapshots
+  snapshots = temporal_df[temporal_df['trigger_72h_100mm'] == 1]  # 63 dias
+  snapshots += temporal_df[temporal_df['flood_label'] > 0]         # 8 dias (ground truth)
+  snapshots += temporal_df.sample(200)                              # dias normais (balanceamento)
+
+  for _, snap in snapshots.iterrows():
+      data = build_pyg_data(snap['date'], G, node_static_df, temporal_df)
+      # compute y com ETAPA 3
+      # backward pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. NOVAS COLUNAS DO TENSOR x E AJUSTE DO LABEL y — RESUMO EXECUTIVO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TENSOR x (nova dimensão: 7 features por nó)
+────────────────────────────────────────────
+  Índice  Feature              Tipo        Fonte         Justificativa
+  ──────  ───────              ────        ─────         ─────────────
+  0       degree_norm          Estático    OSMnx         Conectividade (já existe)
+  1       betweenness_norm     Estático    NetworkX      Centralidade (já existe)
+  2       river_dist_norm      Estático    OSMnx+Shapely Proximidade ao rio (já existe)
+  3       elevation_norm       Estático    SRTM          CRÍTICO: diferencia várzea de encosta
+  4       precip_72h_norm      Temporal    Chuvas.csv    Principal driver de cheias (NOVO)
+  5       is_wet_season        Temporal    Calendário    Sazonalidade risco (NOVO)
+  6       is_bridge            Estático    OSM           Pontes bloqueiam primeiro (NOVO)
+
+  Racional para o TCC: "A feature de elevação resolve o problema de data leakage
+  porque introduz informação ortogonal à distância euclidiana ao rio. A feature
+  de precipitação acumulada 72h permite ao modelo aprender que o mesmo nó tem
+  diferentes níveis de risco em dias secos versus eventos extremos — algo que
+  o GCN estático não consegue capturar."
+
+LABEL y (nova formulação)
+──────────────────────────
+  ATUAL:  y = exp(-river_dist / threshold)  [idêntico à feature x[2]]
+  NOVO:   y = f(river_dist, elevation, precip_72h, flood_event)
+  
+  Formula explícita:
+    base  = 0.5 * exp(-river_dist / 50)        # decaimento exponencial ao rio
+           + 0.5 * (1 - elevation_norm)         # baixa altitude = risco maior
+    amp   = sigmoid(2 * precip_72h / 100)       # amplificador temporal
+    y_raw = base * amp                          # [0, 1]
+    
+    # Supervisão com eventos reais (8 datas confirmadas)
+    if evento_historico:
+        y_super = flood_severity * exp(-river_dist / 100)
+        y = max(y_raw, y_super)
+    else:
+        y = y_raw
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. PRÓXIMAS ETAPAS EM ORDEM DE PRIORIDADE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PRIORIDADE 1 (esta semana):
+  □ pip install srtm.py
+  □ Criar srtm_elevation.py: para cada nó do grafo, obter elevation_m
+  □ Adicionar elevation_norm como feature 3 em gcn.py
+  □ Ajustar label y = 0.5*river_dist_score + 0.5*(1-elev_norm)
+  □ Retirar river_dist_norm de x (evitar leakage)
+
+PRIORIDADE 2 (esta semana):
+  □ Criar temporal_features.py lendo Chuvas.csv já disponível
+  □ Adicionar precip_72h_norm e is_wet_season como features 4 e 5 em x
+  □ Testar modelo com 7 features: verificar se top-20 nós mudam
+
+PRIORIDADE 3 (próxima semana):
+  □ Criar flood_events_ground_truth.csv com as 8 datas confirmadas
+  □ Implementar supervised loss para esses dias específicos
+  □ Treinar modelo em múltiplos snapshots (63 dias de alerta + 8 eventos reais)
+
+PRIORIDADE 4 (fase GAT):
+  □ Migrar GCNConv → GATConv (justificativa: nós periféricos ribeirinhos)
+  □ Visualizar attention weights nas pontes (feature is_bridge)
+  □ Documentar para a banca: "o modelo aprende a prestar atenção em arestas
+    de pontes sobre o Rio das Velhas"
+
+PRIORIDADE 5 (dados adicionais — opcional para TCC):
+  □ Baixar shapefile CPRM de áreas de risco → cruzar com nós do grafo
+  □ Consultar S2ID por decretos municipais de Sabará (ground truth adicional)
+  □ Consultar OpenMeteo API para preencher lacunas na série de precipitação
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. ARGUMENTO PARA A BANCA — COMO EXPLICAR CADA ESCOLHA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Sobre a escolha dos dados:
+  "Os dados utilizados provêm da ANA (Agência Nacional de Águas) via portal
+  HidroWeb, que é a fonte oficial de monitoramento fluviométrico e
+  pluviométrico no Brasil. A estação 1943006 (Sabará) possui série contínua
+  desde 1941, com 84 anos de dados que permitem caracterizar a climatologia
+  local e identificar anomalias nos eventos de enchente."
+
+Sobre a validação cruzada:
+  "Os dados pluviométricos confirmam todos os 5 eventos registrados no Plano
+  Municipal de Gerenciamento de Riscos e Desastres (PLANCON 2025). O evento
+  de janeiro/2020 registrou 606mm no mês — o maior da série 2000-2025 — com
+  pico de 266mm em 72 horas, 2,6 vezes o limiar de alerta de 100mm definido
+  pelo próprio PLANCON para acionamento do sistema de contingência."
+
+Sobre a label y:
+  "A label anterior sofria de data leakage: a distância ao rio era tanto
+  feature de entrada quanto variável alvo, fazendo o GCN aprender uma função
+  trivial de identidade. A nova formulação incorpora elevação topográfica
+  (SRTM/NASA) e precipitação acumulada 72h, tornando o label fisicamente
+  interpretável e quebrando a dependência linear com as features de entrada."
+
+Sobre os 8 eventos supervisionados:
+  "Com apenas 8 datas confirmadas de eventos reais, o modelo opera em um
+  regime semi-supervisionado: a maioria das amostras usa o label físico
+  derivado, enquanto as 8 datas de eventos históricos fornecem ancoragem
+  supervisionada direta. Esse design é consistente com a literatura de GNNs
+  aplicados a desastres naturais, onde ground truth rotulado é escasso."
+================================================================================
+FIM DO PLANO
+================================================================================

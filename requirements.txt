@@ -1,0 +1,13 @@
+numpy
+pandas
+scikit-learn
+matplotlib
+seaborn
+networkx
+scipy
+geopandas
+shapely
+osmnx
+tqdm
+torch
+torch-geometric
