@@ -1,7 +1,7 @@
 """
 analysis_blocked.py
 ───────────────────
-Script orquestrador — análise do grafo bloqueado (remoção dos nós de risco).
+Análise do grafo bloqueado (remoção dos nós de risco).
 
 Etapas
   1. Carrega e pré-processa o grafo de Sabará
@@ -14,7 +14,6 @@ Etapas
   6. Gera figuras comparativas salvas em assets/images/
   7. Exibe relatório consolidado no console
 
-Importa exclusivamente dos módulos locais; não duplica lógica.
 """
 
 import sys
@@ -43,7 +42,7 @@ from visualization import (
 # Relatório consolidado
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _print_report(
+def print_report(
     results_orig: dict,
     results_blocked: dict,
     disconnected: bool,
@@ -116,20 +115,20 @@ def main(
     """
     Parâmetros
     ──────────
-    place     : nome do lugar (Nominatim)
+    place    
     threshold : distância de risco ao rio em metros
     source    : nó de origem do par de referência
     target    : nó de destino do par de referência
     top_iso   : quantos nós isolados destacar
     """
 
-    # ── 1. Grafo original ──────────────────────────────────────────────────────
+    # Grafo original
     G = build_graph(place)
 
-    # ── 2. Nós de risco ────────────────────────────────────────────────────────
+    # Nós de risco 
     risk_nodes, risk_info, rivers = identify_flood_risk_nodes(G, place, threshold)
 
-    # ── 3. Nós mais próximos do rio (relatório + mapa) ─────────────────────────
+    # Nós mais próximos do rio (relatório + mapa)
     nearby = find_nearest_river_nodes(G, place, threshold=threshold)
     plot_nearest_river_nodes(
         G, nearby, rivers,
@@ -138,12 +137,12 @@ def main(
         filename="nearest_river_nodes.png",
     )
 
-    # ── 4. Rota de referência no grafo original ────────────────────────────────
+    # Rota de referência no grafo original 
     print(f"\nCalculando rota original {source}→{target}...")
     results_orig = run_algorithms(G, source, target)
     route_orig   = results_orig["Dijkstra"]["path"]
 
-    # ── 5. Grafo bloqueado ────────────────────────────────────────────────────
+    # Grafo bloqueado 
     G_blocked = make_blocked_graph(G, risk_nodes)
 
     src_in = source in G_blocked.nodes()
@@ -159,7 +158,7 @@ def main(
 
     disconnected = not pair_connected
 
-    # ── 6. Algoritmos no grafo bloqueado ──────────────────────────────────────
+    # Algoritmos no grafo bloqueado
     if pair_connected:
         print(f"\nRodando algoritmos no grafo bloqueado (par original)...")
         results_blocked = run_algorithms(G_blocked, source, target)
@@ -175,12 +174,12 @@ def main(
         results_blocked = run_algorithms(G_blocked, src_alt, tgt_alt)
         route_alt = results_blocked["Dijkstra"]["path"]
 
-    # ── 7. Floyd-Warshall no grafo original (nós isolados) ────────────────────
+    # Floyd-Warshall no grafo original (nós isolados)
     matrix_orig, nodes_orig = compute_fw_matrix(G)
     iso_nodes, _ = find_isolated_nodes(matrix_orig, nodes_orig, top_n=top_iso)
 
-    # ── 8. Relatório ──────────────────────────────────────────────────────────
-    _print_report(
+    # Relatório 
+    print_report(
         results_orig, results_blocked, disconnected,
         source, target, src_alt, tgt_alt,
         iso_nodes, risk_nodes,

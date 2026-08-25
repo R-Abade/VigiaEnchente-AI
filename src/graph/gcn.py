@@ -1,18 +1,20 @@
 """
 gcn.py
 
-Node features (x) — 7 features
-  0  degree_norm     — normalized degree [0,1]
-  1  river_dist_norm — exp(-dist/threshold), close to river → 1.0
-  2  betweenness_norm— normalized betweenness centrality
-  3  elevation_norm  — SRTM elevation normalized [0,1] (low → high risk)
-  4  is_bridge       — 1 if node is on a bridge (OSM)
-  5  is_near_river   — 1 if distance <= threshold (critical node)
-  6  highway_primary — 1 if major road (primary/trunk/motorway)
+GCN para predição de risco de inundação em rede viária.
 
-Label y
+Node features (6):
+  0  degree_norm      — grau normalizado [0,1]
+  1  betweenness_norm — betweenness normalizada
+  2  elevation_norm   — elevação SRTM normalizada [0,1] (baixa = alto risco)
+  3  is_near_river    — 1 se distância ao rio <= threshold
+  4  is_bridge        — 1 se nó está em uma ponte (OSM)
+  5  highway_primary  — 1 se rodovia primária/trunk/motorway
+
+Label y:
   river_dist_norm * elevation_risk
-  elevation_risk = 1 - elevation_norm  (low elevation = high risk)
+  elevation_risk = 1 - elevation_norm
+  Nós dentro do buffer recebem y = 1.0
 """
 
 import sys
@@ -24,8 +26,8 @@ import torch
 import torch_geometric as tg
 import numpy as np
 import visualization
-
-from loader import build_graph, load_graph
+from scipy.stats import spearmanr
+from loader import build_graph
 from flood import identify_flood_risk_nodes, compute_river_distance
 from metrics import compute_betweenness
 
@@ -40,162 +42,126 @@ PRIMARY_HIGHWAY_TYPES = {
 
 class GCNRisk(torch.nn.Module):
     def __init__(self):
-        super(GCNRisk, self).__init__()
-        self.conv1 = tg.nn.GCNConv(6, 32)
-        self.conv2 = tg.nn.GCNConv(32, 16)
-        self.conv3 = tg.nn.GCNConv(16, 1)
+        super().__init__()
+        self.conv1 = tg.nn.GCNConv(6, 36)
+        self.conv2 = tg.nn.GCNConv(36, 1)
 
-    def forward(self, x, edge_index, edge_weight):
-        x = torch.relu(self.conv1(x, edge_index, edge_weight))
-        x = torch.relu(self.conv2(x, edge_index, edge_weight))
-        x = self.conv3(x, edge_index, edge_weight)
-        return x
+    def forward(self, features, edge_index, edge_weight):
+        features = torch.relu(self.conv1(features, edge_index, edge_weight))
+        return self.conv2(features, edge_index, edge_weight)
 
 
-def _get_node_highway_types(graph, node):
-    """Return a set of highway types from edges incident to the node."""
-    highway_types = set()
+class MLP(torch.nn.Module):
+    """MLP baseline — ignora estrutura de grafo (6→36→1)."""
+    def __init__(self):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(6, 36),
+            torch.nn.ReLU(),
+            torch.nn.Linear(36, 1),
+        )
+
+    def forward(self, features):
+        return self.net(features)
+
+
+def get_node_highway_types(graph, node):
+    """Retorna os tipos highway das arestas incidentes ao nó."""
+    types = set()
     for _, _, edge_data in graph.edges(node, data=True):
         road_type = edge_data.get("highway", "")
-
         if isinstance(road_type, list):
-            highway_types.update(road_type)
-
+            types.update(road_type)
         elif road_type:
-            highway_types.add(road_type)
-
-    return highway_types
+            types.add(road_type)
+    return types
 
 
 def build_pyg_data(place="Sabará, Minas Gerais, Brazil", threshold=50.0):
     graph = build_graph(place)
     nodes = list(graph.nodes())
-    node_index = {node: i for i, node in enumerate(nodes)}
+    node_index = {node: position for position, node in enumerate(nodes)}
+    n_nodes = len(nodes)
 
-    # ---- Normalized degree ----
-    degrees = np.zeros(len(nodes), dtype=np.float32)
+    # ---- Grau normalizado ----
+    degrees = np.array([graph.degree(node) for node in nodes], dtype=np.float32)
+    degrees_norm = degrees / degrees.max() if degrees.max() > 0 else degrees
 
-    for i, node in enumerate(nodes):
-        degrees[i] = graph.degree(node)
-    max_degree = degrees.max()
-
-    if max_degree > 0:
-        degrees_norm = degrees / max_degree
-    else:
-        degrees_norm = degrees
-
-    # ---- River distance, elevation, and binary risk flag ----
+    # ---- Distância ao rio e elevação ----
     risk_nodes, _, rivers = identify_flood_risk_nodes(graph, place, threshold=threshold)
     distance_dict = compute_river_distance(graph, place)
 
-    river_dist = np.zeros(len(nodes), dtype=np.float32)
-    raw_elevation = np.zeros(len(nodes), dtype=np.float32)
+    river_dist = np.zeros(n_nodes, dtype=np.float32)
+    raw_elevation = np.zeros(n_nodes, dtype=np.float32)
 
-    for i, node in enumerate(nodes):
+    for position, node in enumerate(nodes):
         info = distance_dict.get(node, {"dist_m": 0.0, "elevation": 0.0})
-        river_dist[i] = info["dist_m"]
-        elevation = info["elevation"]
-        if elevation is None:
-            elevation = 0.0
-        raw_elevation[i] = elevation
+        river_dist[position] = info["dist_m"]
+        raw_elevation[position] = info["elevation"] or 0.0
 
     river_dist_norm = np.exp(-river_dist / threshold)
+    elevation_norm = raw_elevation / raw_elevation.max() if raw_elevation.max() > 0 else raw_elevation
 
-    max_elevation = raw_elevation.max()
-
-    if max_elevation > 0:
-        elevation_norm = raw_elevation / max_elevation
-    else:
-        elevation_norm = raw_elevation
-
-    is_near_river = np.zeros(len(nodes), dtype=np.float32)
-
-    for i, node in enumerate(nodes):
+    is_near_river = np.zeros(n_nodes, dtype=np.float32)
+    for position, node in enumerate(nodes):
         if node in risk_nodes:
-            is_near_river[i] = 1.0
+            is_near_river[position] = 1.0
 
-    # ---- Betweenness centrality ----
+    # ---- Betweenness ----
     betweenness_dict, _ = compute_betweenness(graph)
-    betweenness = np.zeros(len(nodes), dtype=np.float32)
+    betweenness = np.array([betweenness_dict.get(node, 0.0) for node in nodes], dtype=np.float32)
+    betweenness_norm = betweenness / betweenness.max() if betweenness.max() > 0 else betweenness
 
-    for i, node in enumerate(nodes):
-        betweenness[i] = betweenness_dict.get(node, 0.0)
-    max_bet = betweenness.max()
-
-    if max_bet > 0:
-        betweenness = betweenness / max_bet
-
-    # ---- Is Bridge?  ----
-    bridge= np.zeros(len(nodes), dtype=np.float32)
-
-    for i, node in enumerate(nodes):
-        has_bridge = False
-
+    # ---- Ponte ----
+    bridge = np.zeros(n_nodes, dtype=np.float32)
+    for position, node in enumerate(nodes):
         for _, _, edge_data in graph.edges(node, data=True):
-            bridge_val = edge_data.get("bridge")
-
-            if bridge_val in (True, "yes", 1):
-                has_bridge = True
+            if edge_data.get("bridge") in (True, "yes", 1):
+                bridge[position] = 1.0
                 break
 
-        if has_bridge:
-            bridge[i] = 1.0
+    # ---- Rodovia primária ----
+    highway = np.zeros(n_nodes, dtype=np.float32)
+    for position, node in enumerate(nodes):
+        if get_node_highway_types(graph, node) & PRIMARY_HIGHWAY_TYPES:
+            highway[position] = 1.0
 
-    # ---- Primary highway indicator ----
-    highway = np.zeros(len(nodes), dtype=np.float32)
-
-    for i, node in enumerate(nodes):
-        types_set = _get_node_highway_types(graph, node)
-
-        if types_set & PRIMARY_HIGHWAY_TYPES:
-            highway[i] = 1.0
-
-    # ---- Build feature matrix (N x 7) ----
-    x_np = np.stack([
-        degrees_norm, betweenness,
-        elevation_norm, bridge, is_near_river, highway
+    # ---- Matriz de features ----
+    features_np = np.stack([
+        degrees_norm,
+        betweenness_norm,
+        elevation_norm,
+        is_near_river,
+        bridge,
+        highway
     ], axis=1)
-    x = torch.tensor(x_np, dtype=torch.float)
+    features = torch.tensor(features_np, dtype=torch.float)
 
-    # ---- Edges and edge weights ----
-    src_nodes = []
-    dst_nodes = []
-    edge_weights = []
-
+    # ---- Arestas ----
+    src_nodes, dst_nodes, edge_weights = [], [], []
     for u, v, edge_data in graph.edges(data=True):
-        i = node_index[u]
-        j = node_index[v]
-        w = float(edge_data.get("weight", 1.0))
-        src_nodes.append(i)
-        dst_nodes.append(j)
-        edge_weights.append(w)
-        src_nodes.append(j)
-        dst_nodes.append(i)
-        edge_weights.append(w)
+        i, j = node_index[u], node_index[v]
+        weight = float(edge_data.get("weight", 1.0))
+        src_nodes.extend([i, j])
+        dst_nodes.extend([j, i])
+        edge_weights.extend([weight, weight])
 
     edge_index = torch.tensor([src_nodes, dst_nodes], dtype=torch.long)
     edge_weight = torch.tensor(edge_weights, dtype=torch.float)
-    max_weight = edge_weight.max()
+    edge_weight = edge_weight / edge_weight.max() if edge_weight.max() > 0 else edge_weight
 
-    if max_weight > 0:
-        edge_weight = edge_weight / max_weight
-
-    # ---- Label y = river_dist_norm * (1 - elevation_norm) ----
+    # ---- Rótulo ----
     elevation_risk = 1.0 - elevation_norm
     y_np = river_dist_norm * elevation_risk
-    max_y = y_np.max()
+    y_np = y_np / y_np.max() if y_np.max() > 0 else y_np
 
-    if max_y > 0:
-        y_np = y_np / max_y
-
-    for i, node in enumerate(nodes):
-
+    for position, node in enumerate(nodes):
         if node in risk_nodes:
-            y_np[i] = 1.0
+            y_np[position] = 1.0
 
     y = torch.tensor(y_np, dtype=torch.float)
 
-    # ---- Raw data for debugging ----
+    # ---- Dados brutos para depuração ----
     raw_data = {
         "degrees": degrees,
         "river_dist": river_dist,
@@ -203,66 +169,65 @@ def build_pyg_data(place="Sabará, Minas Gerais, Brazil", threshold=50.0):
         "betweenness": betweenness,
     }
 
-    print("\n---------- Dataset ----------")
-    print(f"Nodes: {x.shape[0]}")
-    print(f"Edges: {edge_index.shape[1]}")
-    print(f"Critical nodes: {len(risk_nodes)}")
+    data = tg.data.Data(x=features, edge_index=edge_index, edge_weight=edge_weight, y=y)
 
-    data = tg.data.Data(x=x, edge_index=edge_index, edge_weight=edge_weight, y=y)
-
-    print("\n---------- Dataset ----------")
-    print(f"Nodes: {x.shape[0]}")
-    print(f"Edges: {edge_index.shape[1]}")
-    print(f"Critical nodes: {len(risk_nodes)}")
+    print("\n--- Dataset ---")
+    print(f"Nós: {n_nodes}")
+    print(f"Arestas (bidirecional): {edge_index.shape[1]}")
+    print(f"Nós críticos (buffer): {len(risk_nodes)}")
 
     return data, nodes, raw_data, graph, risk_nodes, rivers, threshold
 
 
 def evaluate(predictions, targets, mask):
+    """MSE, MAE e Spearman para os nós do mask."""
     pred = predictions.squeeze()
+
     mse = torch.mean((pred[mask] - targets[mask]) ** 2).item()
     mae = torch.mean(torch.abs(pred[mask] - targets[mask])).item()
 
-    return mse, mae
+    pred_np = pred[mask].detach().numpy()
+    y_np = targets[mask].detach().numpy()
+    rho, _ = spearmanr(pred_np, y_np)
+
+    return mse, mae, rho
 
 
-def print_neighbors(index_node: int, data, data_raw, pred):
-    """
-    Exibe um nó e todos os seus vizinhos de primeiro nível.
-    """
-    pred = pred.squeeze()
+def print_neighbors(node_id: int, data, raw_data, predictions):
+    """Exibe um nó e todos os seus vizinhos de primeiro nível."""
+    predictions = predictions.squeeze()
 
-    mask = data.edge_index[0] == index_node
+    mask = data.edge_index[0] == node_id
     neighbors = data.edge_index[1][mask].tolist()
 
-    def formater_line(index):
+    def format_line(index):
         return (
             f"  Nó {index:>4} | "
-            f"pred: {pred[index].item():.4f} | "
+            f"pred: {predictions[index].item():.4f} | "
             f"y: {data.y[index].item():.4f} | "
-            f"dist_rio: {data_raw['river_dist'][index]:.1f}m | "
-            f"elevação: {data_raw['elevation'][index]:.1f}m | "
-            f"grau: {int(data_raw['degrees'][index])} | "
-            f"betweenness: {data_raw['betweenness'][index]:.6f}"
+            f"dist_rio: {raw_data['river_dist'][index]:.1f}m | "
+            f"elevação: {raw_data['elevation'][index]:.1f}m | "
+            f"grau: {int(raw_data['degrees'][index])} | "
+            f"betweenness: {raw_data['betweenness'][index]:.6f}"
         )
 
-    print(f"\n---------- Nó {index_node} e seus neighbors ----------")
-    print(f"[alvo] {formater_line(index_node)}")
+    print(f"\n--- Nó {node_id} e seus vizinhos ---")
+    print(f"[alvo] {format_line(node_id)}")
 
     if not neighbors:
         print("  Nenhum vizinho encontrado.")
         return
 
-    for n in sorted(set(neighbors)):
-        print(f"[viz]  {formater_line(n)}")
+    for neighbor in sorted(set(neighbors)):
+        print(f"[viz]  {format_line(neighbor)}")
 
 
-def loss_optimization(data, nodes, raw_data, graph, risk_nodes, rivers, threshold):
+def train_and_evaluate(data, nodes, raw_data, graph, risk_nodes, rivers, threshold):
     n_nodes = data.num_nodes
     edge_index = data.edge_index
     edge_weight = data.edge_weight
 
-    # Shuffle and split 70/15/15
+    # ---- Split 70/15/15 ----
     perm = torch.randperm(n_nodes)
     train_end = int(0.70 * n_nodes)
     val_end = int(0.85 * n_nodes)
@@ -271,86 +236,124 @@ def loss_optimization(data, nodes, raw_data, graph, risk_nodes, rivers, threshol
     val_mask = torch.zeros(n_nodes, dtype=torch.bool)
     test_mask = torch.zeros(n_nodes, dtype=torch.bool)
 
-    for i in perm[:train_end]:
-        train_mask[i] = True
+    for position in perm[:train_end]:
+        train_mask[position] = True
+    for position in perm[train_end:val_end]:
+        val_mask[position] = True
+    for position in perm[val_end:]:
+        test_mask[position] = True
 
-    for i in perm[train_end:val_end]:
-        val_mask[i] = True
-
-    for i in perm[val_end:]:
-        test_mask[i] = True
-
-    # Model and optimizer
+    # ---- GCN ----
     gcn = GCNRisk()
     optimizer = torch.optim.Adam(gcn.parameters(), lr=0.01, weight_decay=1e-4)
 
-    # Training
     gcn.train()
     loss_history = []
 
     for epoch in range(1000):
         optimizer.zero_grad()
         output = gcn(data.x, edge_index, edge_weight)
-        loss = torch.nn.functional.mse_loss(
-            output.squeeze()[train_mask],
-            data.y[train_mask]
-        )
+        loss = torch.nn.functional.mse_loss(output.squeeze()[train_mask], data.y[train_mask])
         loss.backward()
         optimizer.step()
         loss_history.append(loss.item())
 
         if epoch % 100 == 0:
-            print(f"Epoch {epoch:>4} | Loss: {loss.item():.6f}")
-        
-    # Evaluation
+            print(f"Época {epoch:>4} | Loss: {loss.item():.6f}")
+
+    # ---- Avaliação GCN ----
     gcn.eval()
     with torch.no_grad():
-        pred = gcn(data.x, edge_index, edge_weight)
+        gcn_pred = gcn(data.x, edge_index, edge_weight)
 
-    train_mse, train_mae = evaluate(pred, data.y, train_mask)
-    val_mse, val_mae = evaluate(pred, data.y, val_mask)
-    test_mse, test_mae = evaluate(pred, data.y, test_mask)
+    train_mse, train_mae, train_rho = evaluate(gcn_pred, data.y, train_mask)
+    val_mse, val_mae, val_rho = evaluate(gcn_pred, data.y, val_mask)
+    test_mse, test_mae, test_rho = evaluate(gcn_pred, data.y, test_mask)
 
-    pred = pred.squeeze()
+    gcn_pred = gcn_pred.squeeze()
 
-    # Top 20 predictions
-    sorted_vals, sorted_indices = torch.sort(pred, descending=True)
+    # ---- Top 20 GCN ----
+    sorted_vals, sorted_indices = torch.sort(gcn_pred, descending=True)
     top20 = sorted_indices[:20]
-    print("\nTop 20 nodes by predicted risk:")
 
-    for node in top20:
-        i = node.item()
+    print("\nTop 20 nós por risco previsto (GCN):")
+    for position in top20:
+        node = position.item()
         print(
-            f"Node {i:>4} | "
-            f"pred: {pred[i].item():.4f} | "
-            f"y: {data.y[i].item():.4f} | "
-            f"river_dist: {raw_data['river_dist'][i]:.1f}m | "
-            f"elevation: {raw_data['elevation'][i]:.1f}m | "
-            f"degree: {int(raw_data['degrees'][i])} | "
-            f"betweenness: {raw_data['betweenness'][i]:.6f}"
+            f"Nó {node:>4} | "
+            f"pred: {gcn_pred[node].item():.4f} | "
+            f"y: {data.y[node].item():.4f} | "
+            f"rio: {raw_data['river_dist'][node]:.1f}m | "
+            f"elev: {raw_data['elevation'][node]:.1f}m | "
+            f"grau: {int(raw_data['degrees'][node])} | "
+            f"bet: {raw_data['betweenness'][node]:.6f}"
         )
 
-    print("\n---------- Final Evaluation ----------")
-    print(f"Train MSE: {train_mse:.4f} | MAE: {train_mae:.4f}")
-    print(f"Val MSE: {val_mse:.4f} | MAE: {val_mae:.4f}")
-    print(f"Test MSE: {test_mse:.4f} | MAE: {test_mae:.4f}")
+    print("\n--- Avaliação GCN ---")
+    print(f"{'':6} {'MSE':>8} {'MAE':>8} {'Spearman ρ':>12}")
+    print(f"{'Train':6} {train_mse:>8.4f} {train_mae:>8.4f} {train_rho:>12.4f}")
+    print(f"{'Val':6}   {val_mse:>8.4f} {val_mae:>8.4f} {val_rho:>12.4f}")
+    print(f"{'Test':6}  {test_mse:>8.4f} {test_mae:>8.4f} {test_rho:>12.4f}")
 
-    # ---------- Visualizações GCN ----------
-    pred_np  = pred.detach().numpy()
-    y_np     = data.y.numpy()
+    # ---- MLP ----
+    print("\n--- MLP (sem grafo) ---")
+    mlp = MLP()
+    mlp_optimizer = torch.optim.Adam(mlp.parameters(), lr=0.01, weight_decay=1e-4)
+
+    mlp.train()
+    for epoch in range(1000):
+        mlp_optimizer.zero_grad()
+        output = mlp(data.x)
+        loss = torch.nn.functional.mse_loss(output.squeeze()[train_mask], data.y[train_mask])
+        loss.backward()
+        mlp_optimizer.step()
+
+    mlp.eval()
+    with torch.no_grad():
+        mlp_pred = mlp(data.x).squeeze()
+
+    # ---- Top 20 MLP ----
+    top20_mlp = torch.argsort(mlp_pred, descending=True)[:20]
+
+    print("\nTop 20 nós por risco previsto (MLP):")
+    for position in top20_mlp:
+        node = position.item()
+        print(
+            f"Nó {node:>4} | "
+            f"pred: {mlp_pred[node].item():.4f} | "
+            f"y: {data.y[node].item():.4f} | "
+            f"rio: {raw_data['river_dist'][node]:.1f}m | "
+            f"elev: {raw_data['elevation'][node]:.1f}m | "
+            f"grau: {int(raw_data['degrees'][node])} | "
+            f"bet: {raw_data['betweenness'][node]:.6f}"
+        )
+
+    mlp_train = evaluate(mlp_pred.unsqueeze(1), data.y, train_mask)
+    mlp_val = evaluate(mlp_pred.unsqueeze(1), data.y, val_mask)
+    mlp_test = evaluate(mlp_pred.unsqueeze(1), data.y, test_mask)
+
+    print(f"\n{'':6} {'MSE':>8} {'MAE':>8} {'Spearman ρ':>12}")
+    print(f"{'Train':6} {mlp_train[0]:>8.4f} {mlp_train[1]:>8.4f} {mlp_train[2]:>12.4f}")
+    print(f"{'Val':6}   {mlp_val[0]:>8.4f} {mlp_val[1]:>8.4f} {mlp_val[2]:>12.4f}")
+    print(f"{'Test':6}  {mlp_test[0]:>8.4f} {mlp_test[1]:>8.4f} {mlp_test[2]:>12.4f}")
+
+    # ---- Visualizações ----
+    gcn_pred_np = gcn_pred.detach().numpy()
+    y_np = data.y.numpy()
 
     visualization.plot_graph_on_map(
-        G=graph,
+        graph=graph,
         nodes=nodes,
-        risk_scores=pred_np,
+        risk_scores=gcn_pred_np,
         risk_nodes=risk_nodes,
         rivers=rivers,
         threshold=threshold,
     )
+
     visualization.plot_top_risk_nodes(
-        G=graph,
+        graph=graph,
         nodes=nodes,
-        risk_scores=pred_np,
+        risk_scores=gcn_pred_np,
         y_true=y_np,
         risk_nodes=risk_nodes,
         rivers=rivers,
@@ -363,13 +366,14 @@ def loss_optimization(data, nodes, raw_data, graph, risk_nodes, rivers, threshol
         filename="gcn_training_curve.png"
     )
 
-    # ---------- Vizinhos ----------
-    print_neighbors(919, data, raw_data, pred)
-    print_neighbors(11,  data, raw_data, pred)
+    # ---- Vizinhos de nós teste ----
+    # print_neighbors(919, data, raw_data, gcn_pred)
+    # print_neighbors(11, data, raw_data, gcn_pred)
+
 
 def main():
     data, nodes, raw_data, graph, risk_nodes, rivers, threshold = build_pyg_data()
-    loss_optimization(data, nodes, raw_data, graph, risk_nodes, rivers, threshold)
+    train_and_evaluate(data, nodes, raw_data, graph, risk_nodes, rivers, threshold)
 
 
 if __name__ == "__main__":
