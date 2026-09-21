@@ -1,0 +1,31 @@
+# Ambientes virtuais Python
+venv/
+.venv/
+env/
+.env/
+
+# Cache do Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Cache do OSMnx / projeto
+cache/
+src/graph/cache/
+
+# Dados gerados
+data/output/
+data/processed/
+
+# Distribuição / build
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.idea/
+.vscode/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
