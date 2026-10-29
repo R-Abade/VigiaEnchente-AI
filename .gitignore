@@ -1,31 +1,60 @@
-# Ambientes virtuais Python
-venv/
-.venv/
-env/
-.env/
+# Python 3.12 — VigiaEnchente Microsserviço GCN
+# ─────────────────────────────────────────────
 
-# Cache do Python
+# Bytecode e caches Python
 __pycache__/
 *.py[cod]
 *.pyo
-
-# Cache do OSMnx / projeto
-cache/
-src/graph/cache/
-
-# Dados gerados
-data/output/
-data/processed/
-
-# Distribuição / build
+*.pyd
+*.so
+*.egg
 *.egg-info/
 dist/
 build/
+.eggs/
+
+# Ambiente virtual
+.venv/
+venv/
+env/
+
+# Modelos treinados e artefatos binários (exceto o marcador de pasta)
+models/*
+!models/.gitkeep
+*.pt
+*.pth
+*.joblib
+*.pkl
+
+# Cache OSM e outputs gerados por scripts
+# A pasta em si é rastreada (tem .gitkeep); só o conteúdo gerado é ignorado
+data/cache/*.json
+data/cache/*.graphml
+data/cache/*.pkl
+data/output/*.txt
+data/output/*.csv
+data/output/*.png
+data/output/*.pdf
+
+# Cache legado na raiz (duplicata, não mais usado)
+/cache/
+
+# Variáveis de ambiente
+.env
+.env.*
+!.env.example
+
+# Imagens e PDFs gerados por scripts offline
+assets/images/*.png
+assets/images/*.pdf
 
 # IDEs
+.vscode/settings.json
 .idea/
-.vscode/
 
-# Sistema operacional
+# OS
 .DS_Store
 Thumbs.db
+
+# Outros serviços (cada um tem seu próprio repositório)
+src/services/
