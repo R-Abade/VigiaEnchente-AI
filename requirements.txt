@@ -1,13 +1,35 @@
-numpy
-pandas
-scikit-learn
-matplotlib
-seaborn
-networkx
-scipy
-geopandas
-shapely
-osmnx
-tqdm
-torch
-torch-geometric
+# Python 3.12 — VigiaEnchente Microsserviço GCN
+# Instalar com: pip install -r requirements.txt
+# ──────────────────────────────────────────────
+
+# Grafo viário e análise espacial
+osmnx==2.0.1
+networkx==3.4.2
+shapely==2.0.6
+pyproj==3.7.0
+geopandas==1.0.1
+
+# Dados e álgebra
+numpy==2.2.3
+scipy==1.15.2
+pandas==2.2.3
+
+# Elevação SRTM
+srtm.py==0.3.6
+
+# GCN
+torch==2.6.0
+torch-geometric==2.6.1
+
+# Visualização (scripts offline)
+matplotlib==3.10.1
+seaborn==0.13.2
+contextily==1.6.2
+
+# Geocoding reverso (scripts offline)
+geopy==2.4.1
+
+# Microsserviço FastAPI
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+pydantic-settings==2.8.1
