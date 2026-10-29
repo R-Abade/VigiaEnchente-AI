@@ -49,7 +49,7 @@ def run_algorithms(G, source, target):
 
 def compare_routes(G, source, target, risk_nodes: set, penalty_factor: float = 2.0):
     """Compara rota original com rota penalizada por risco."""
-    from flood import apply_flood_penalty, reset_weights
+    from src.graph.flood import apply_flood_penalty, reset_weights
 
     reset_weights(G)
     route_orig = nx.dijkstra_path(G, source, target, weight="weight")
