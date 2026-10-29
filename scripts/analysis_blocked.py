@@ -1,40 +1,35 @@
 """
 analysis_blocked.py
-───────────────────
-Baixa o grafo de Sabará, escolhe o par de nós mais distantes,
-calcula a rota original e, em seguida, uma rota segura que usa
-os MESMOS nós de origem/destino mas evita (ou minimiza) a
-passagem por nós de risco próximos ao Rio das Velhas.
 
-Estratégia: em vez de REMOVER os nós de risco (o que pode
-desconectar o grafo), aplicamos uma penalização alta às arestas
-incidentes a eles via flood.apply_flood_penalty. O caminho mais
-curto então:
+Orquestrador offline: baixa o grafo de Sabará, escolhe o par de nós mais
+distantes, calcula a rota original e uma rota segura que evita (ou minimiza)
+a passagem por nós de risco próximos ao Rio das Velhas.
+
+Estratégia: em vez de remover os nós de risco (o que pode desconectar o
+grafo), aplica-se uma penalização alta às arestas incidentes a eles via
+flood.apply_flood_penalty. O caminho mais curto então:
   • evita 100% dos nós de risco quando existe alternativa;
   • atravessa o mínimo possível quando for inevitável.
+
+Uso:
+    python -m scripts.analysis_blocked
 """
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import networkx as nx
 
-from loader import build_graph
-from flood import identify_flood_risk_nodes, apply_flood_penalty, reset_weights
-from routing import run_algorithms
-from metrics import compute_fw_matrix, compute_diameter
-from visualization import plot_blocked_comparison
+from src.graph.loader import build_graph
+from src.graph.flood import identify_flood_risk_nodes, apply_flood_penalty, reset_weights
+from src.graph.routing import run_algorithms
+from src.graph.visualization import plot_blocked_comparison
+from scripts.legacy_metrics import compute_fw_matrix, compute_diameter
 
 
 PENALTY_FACTOR = 5
-
-
-# ── Grafo ─────────────────────────────────────────────────────────────────────
-
-def load_graph(place: str):
-    return build_graph(place)
 
 
 # ── Par mais distante ─────────────────────────────────────────────────────────
@@ -83,34 +78,10 @@ def build_penalized_graph(G, risk_nodes, penalty_factor):
 # ── Nós de risco na rota ──────────────────────────────────────────────────────
 
 def risk_nodes_in_route(route, risk_nodes):
-    nodes_in_risk = []
-    for node in route:
-        if node in risk_nodes:
-            nodes_in_risk.append(node)
-    return nodes_in_risk
+    return [node for node in route if node in risk_nodes]
 
 
 # ── Relatório ─────────────────────────────────────────────────────────────────
-
-def format_dist(value):
-    if value is not None:
-        return f"{value:.2f}"
-    else:
-        return "N/A"
-
-
-def format_nodes(value):
-    if value is not None:
-        return str(value)
-    else:
-        return "N/A"
-
-
-def format_algo_row(algo, r):
-    dist_str  = format_dist(r["dist"])
-    nodes_str = format_nodes(r["nodes"])
-    return f"  {algo:<12} {dist_str:>12} {nodes_str:>6} {r['time']:>10.5f}"
-
 
 def print_report(results_orig, route_orig, route_safe, dist_safe, source, target, risk_nodes):
     SEP_DOUBLE = "═" * 68
@@ -129,7 +100,9 @@ def print_report(results_orig, route_orig, route_safe, dist_safe, source, target
 
     print(f"  {'Algoritmo':<12} {'Dist. (m)':>12} {'Nós':>6} {'Tempo (s)':>10}")
     for algo, r in results_orig.items():
-        print(format_algo_row(algo, r))
+        dist_str  = f"{r['dist']:.2f}" if r['dist'] is not None else "N/A"
+        nodes_str = str(r['nodes']) if r['nodes'] is not None else "N/A"
+        print(f"  {algo:<12} {dist_str:>12} {nodes_str:>6} {r['time']:>10.5f}")
 
     print(f"\n  Comparação:")
     print(f"    Rota original : {len(route_orig):>3} nós | "
@@ -148,28 +121,10 @@ def print_report(results_orig, route_orig, route_safe, dist_safe, source, target
     print(SEP_DOUBLE)
 
 
-# ── Visualização ──────────────────────────────────────────────────────────────
-
-def render_comparison(G, G_safe, risk_nodes, risk_info, rivers,
-                      route_orig, route_safe, source, target,
-                      results_orig, results_safe, threshold):
-    plot_blocked_comparison(
-        G, G_safe,
-        risk_nodes, risk_info, rivers,
-        route_orig, route_safe,
-        source, target,
-        source, target,
-        False,
-        results_orig, results_safe,
-        threshold=threshold,
-        filename="grafo_bloqueado.png",
-    )
-
-
 # ── Orquestrador ──────────────────────────────────────────────────────────────
 
 def run(place: str = "Sabará, Minas Gerais, Brazil", threshold: float = 50.0):
-    G = load_graph(place)
+    G = build_graph(place)
 
     source, target = find_distant_pair(G)
 
@@ -185,10 +140,14 @@ def run(place: str = "Sabará, Minas Gerais, Brazil", threshold: float = 50.0):
     G_safe       = build_penalized_graph(G, risk_nodes, PENALTY_FACTOR)
     results_safe = build_safe_results(route_safe, dist_safe)
 
-    render_comparison(
+    plot_blocked_comparison(
         G, G_safe, risk_nodes, risk_info, rivers,
         route_orig, route_safe, source, target,
-        results_orig, results_safe, threshold,
+        source, target,
+        False,
+        results_orig, results_safe,
+        threshold=threshold,
+        filename="grafo_bloqueado.png",
     )
 
 

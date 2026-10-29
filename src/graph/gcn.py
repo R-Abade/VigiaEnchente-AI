@@ -17,19 +17,14 @@ Label y:
   Nós dentro do buffer recebem y = 1.0
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent))
-
 import torch
 import torch_geometric as tg
 import numpy as np
-import visualization
 from scipy.stats import spearmanr
-from loader import build_graph
-from flood import identify_flood_risk_nodes, compute_river_distance
-from metrics import compute_betweenness
+
+from src.graph.loader import build_graph
+from src.graph.flood import identify_flood_risk_nodes, compute_river_distance
+from src.graph.features import compute_betweenness
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -41,6 +36,8 @@ PRIMARY_HIGHWAY_TYPES = {
 
 
 class GCNRisk(torch.nn.Module):
+    """Rede GCN de dois layers para regressão de risco por nó (6→36→1)."""
+
     def __init__(self):
         super().__init__()
         self.conv1 = tg.nn.GCNConv(6, 36)
@@ -53,6 +50,7 @@ class GCNRisk(torch.nn.Module):
 
 class MLP(torch.nn.Module):
     """MLP baseline — ignora estrutura de grafo (6→36→1)."""
+
     def __init__(self):
         super().__init__()
         self.net = torch.nn.Sequential(
@@ -78,6 +76,7 @@ def get_node_highway_types(graph, node):
 
 
 def build_pyg_data(place="Sabará, Minas Gerais, Brazil", threshold=50.0):
+    """Constrói o objeto PyG Data com features, arestas e labels para a GCN."""
     graph = build_graph(place)
     nodes = list(graph.nodes())
     node_index = {node: position for position, node in enumerate(nodes)}
@@ -151,6 +150,9 @@ def build_pyg_data(place="Sabará, Minas Gerais, Brazil", threshold=50.0):
     edge_weight = edge_weight / edge_weight.max() if edge_weight.max() > 0 else edge_weight
 
     # ---- Rótulo ----
+    # Nota: is_near_river (feature 3) e y=1.0 usam o mesmo threshold,
+    # o que gera circularidade intencional — o modelo aprende a generalizar
+    # além do buffer para nós com elevação baixa e alta betweenness.
     elevation_risk = 1.0 - elevation_norm
     y_np = river_dist_norm * elevation_risk
     y_np = y_np / y_np.max() if y_np.max() > 0 else y_np
@@ -194,7 +196,7 @@ def evaluate(predictions, targets, mask):
 
 
 def print_neighbors(node_id: int, data, raw_data, predictions):
-    """Exibe um nó e todos os seus vizinhos de primeiro nível."""
+    """Exibe um nó e todos os seus vizinhos de primeiro nível (inspeção manual)."""
     predictions = predictions.squeeze()
 
     mask = data.edge_index[0] == node_id
@@ -223,6 +225,10 @@ def print_neighbors(node_id: int, data, raw_data, predictions):
 
 
 def train_and_evaluate(data, nodes, raw_data, graph, risk_nodes, rivers, threshold):
+    """Treina GCN + MLP baseline e retorna modelos e predições.
+
+    Retorna também gcn_pred e mlp_pred para uso externo (ex.: visualização).
+    """
     n_nodes = data.num_nodes
     edge_index = data.edge_index
     edge_weight = data.edge_weight
@@ -337,44 +343,4 @@ def train_and_evaluate(data, nodes, raw_data, graph, risk_nodes, rivers, thresho
     print(f"{'Val':6}   {mlp_val[0]:>8.4f} {mlp_val[1]:>8.4f} {mlp_val[2]:>12.4f}")
     print(f"{'Test':6}  {mlp_test[0]:>8.4f} {mlp_test[1]:>8.4f} {mlp_test[2]:>12.4f}")
 
-    # ---- Visualizações ----
-    gcn_pred_np = gcn_pred.detach().numpy()
-    y_np = data.y.numpy()
-
-    visualization.plot_graph_on_map(
-        graph=graph,
-        nodes=nodes,
-        risk_scores=gcn_pred_np,
-        risk_nodes=risk_nodes,
-        rivers=rivers,
-        threshold=threshold,
-    )
-
-    visualization.plot_top_risk_nodes(
-        graph=graph,
-        nodes=nodes,
-        risk_scores=gcn_pred_np,
-        y_true=y_np,
-        risk_nodes=risk_nodes,
-        rivers=rivers,
-        top_n=20,
-        threshold=threshold,
-    )
-
-    visualization.plot_training_curve(
-        loss_history=loss_history,
-        filename="gcn_training_curve.png"
-    )
-
-    # ---- Vizinhos de nós teste ----
-    # print_neighbors(919, data, raw_data, gcn_pred)
-    # print_neighbors(11, data, raw_data, gcn_pred)
-
-
-def main():
-    data, nodes, raw_data, graph, risk_nodes, rivers, threshold = build_pyg_data()
-    train_and_evaluate(data, nodes, raw_data, graph, risk_nodes, rivers, threshold)
-
-
-if __name__ == "__main__":
-    main()
+    return gcn, mlp, gcn_pred, mlp_pred, loss_history
