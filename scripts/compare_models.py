@@ -2,27 +2,27 @@
 compare_models.py
 
 Comparação sistemática para a Tabela 4 do artigo:
-- Heurística contínua (sem saturação)
-- MLP completo (6 features)
-- MLP sem is_near_river (5 features)
-- GCN sem is_near_river (5 features)
-- GCN completo (6 features)
+  - Heurística contínua (sem saturação)
+  - MLP completo (6 features)
+  - MLP sem is_near_river (5 features)
+  - GCN sem is_near_river (5 features)
+  - GCN completo (6 features)
 
 Uso:
-    python3 compare_models.py
+    python -m scripts.compare_models
 """
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
 import torch_geometric as tg
 import numpy as np
 from scipy.stats import spearmanr
 
-from gcn import build_pyg_data, GCNRisk, MLP
+from src.graph.gcn import build_pyg_data, GCNRisk, MLP
 
 SEED = 42
 EPOCHS = 1000
@@ -35,15 +35,10 @@ WEIGHT_DECAY = 1e-4
 ABLATED_FEATURE = [0, 1, 2, 4, 5]  # sem is_near_river
 
 
-# -----------------------------------------------------------------------------
-# Métricas
-# -----------------------------------------------------------------------------
+# ── Métricas ──────────────────────────────────────────────────────────────────
 
 def precision_recall_at_k(predictions, risk_node_positions, k=8):
-    """
-    P@k e R@k sobre o ranking de todos os nós.
-    risk_node_positions: índices dos nós no buffer.
-    """
+    """P@k e R@k sobre o ranking de todos os nós."""
     topk = torch.topk(predictions, k).indices.tolist()
     hits = len(set(topk) & risk_node_positions)
     precision = hits / k
@@ -72,9 +67,7 @@ def format_row(name, metrics):
             f"rho={metrics['rho']:.4f}  P@8={metrics['p_at_k']:.2f}  R@8={metrics['r_at_k']:.2f}")
 
 
-# -----------------------------------------------------------------------------
-# Treino
-# -----------------------------------------------------------------------------
+# ── Treino ────────────────────────────────────────────────────────────────────
 
 def train_gcn(features, edge_index, edge_weight, y_true, train_mask, in_channels, hidden=36):
     """Treina um GCN com in_channels variável."""
@@ -83,12 +76,12 @@ def train_gcn(features, edge_index, edge_weight, y_true, train_mask, in_channels
     if in_channels == 6:
         model = GCNRisk()
     else:
-        model = make_gcn(in_channels, hidden)
+        model = _make_gcn(in_channels, hidden)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 
     model.train()
-    for epoch in range(EPOCHS):
+    for _ in range(EPOCHS):
         optimizer.zero_grad()
         output = model(features, edge_index, edge_weight)
         loss = torch.nn.functional.mse_loss(output.squeeze()[train_mask], y_true[train_mask])
@@ -102,7 +95,7 @@ def train_gcn(features, edge_index, edge_weight, y_true, train_mask, in_channels
     return predictions
 
 
-def make_gcn(in_channels, hidden):
+def _make_gcn(in_channels, hidden):
     """GCN com in_channels variável (mesma arquitetura do GCNRisk)."""
     class _GCN(torch.nn.Module):
         def __init__(self):
@@ -137,7 +130,7 @@ def train_mlp(features, y_true, train_mask, in_channels, hidden=36):
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 
     model.train()
-    for epoch in range(EPOCHS):
+    for _ in range(EPOCHS):
         optimizer.zero_grad()
         output = model(features)
         loss = torch.nn.functional.mse_loss(output.squeeze()[train_mask], y_true[train_mask])
@@ -151,9 +144,7 @@ def train_mlp(features, y_true, train_mask, in_channels, hidden=36):
     return predictions
 
 
-# -----------------------------------------------------------------------------
-# Main
-# -----------------------------------------------------------------------------
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     # ---- 1. Dataset ----
@@ -185,9 +176,9 @@ def main():
     print(f"Split: train={train_mask.sum().item()} "
           f"val={val_mask.sum().item()} test={test_mask.sum().item()}")
 
-    n_critical_train = sum(1 for position in risk_node_positions if train_mask[position])
-    n_critical_val = sum(1 for position in risk_node_positions if val_mask[position])
-    n_critical_test = sum(1 for position in risk_node_positions if test_mask[position])
+    n_critical_train = sum(1 for p in risk_node_positions if train_mask[p])
+    n_critical_val = sum(1 for p in risk_node_positions if val_mask[p])
+    n_critical_test = sum(1 for p in risk_node_positions if test_mask[p])
 
     print(f"Nós críticos por split: train={n_critical_train} "
           f"val={n_critical_val} test={n_critical_test} (de 8 totais)")
@@ -201,7 +192,6 @@ def main():
     results = {}
 
     # ---- 3. Heurística contínua ----
-    # Recalcula river_dist_norm a partir do raw_data (não está em x_full)
     river_dist = torch.tensor(raw_data["river_dist"], dtype=torch.float32)
     river_dist_norm = torch.exp(-river_dist / threshold)
     elevation_norm = x_full[:, 2]

@@ -1,33 +1,39 @@
 """
 vigiaEnchente.py
-───────────────
 
-  Penalização de arestas próximas ao Rio das Velhas e comparação de rotas
-  Identificação dos nós mais isolados (Floyd-Warshall)
-  Análise de clusters / sub-regiões 
+Orquestrador das análises Q4/Q5/Q6 do artigo:
+  Q4 — Penalização de arestas próximas ao Rio das Velhas e comparação de rotas
+  Q5 — Identificação dos nós mais isolados (Floyd-Warshall)
+  Q6 — Análise de clusters / sub-regiões
 
+Este script é exclusivamente para uso offline (análise para artigo).
+Não deve ser importado pelo microsserviço FastAPI.
+
+Uso:
+    python -m scripts.vigiaEnchente
 """
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from loader import build_graph
-from flood import identify_flood_risk_nodes
-from routing import compare_routes
-from metrics import (
+import numpy as np
+
+from src.graph.loader import build_graph
+from src.graph.flood import identify_flood_risk_nodes
+from src.graph.routing import compare_routes, run_algorithms
+from src.graph.features import utm_to_latlon
+from scripts.legacy_metrics import (
     compute_network_metrics,
     compute_fw_matrix,
     compute_diameter,
     find_isolated_nodes,
     compute_hierarchical_clusters,
     report_clusters,
-    compute_betweenness,
     geocode_nodes,
-    _utm_to_latlon,
 )
-from visualization import (
+from src.graph.visualization import (
     plot_route_comparison,
     plot_fw_heatmap,
     plot_fw_heatmap_clustered,
@@ -45,17 +51,17 @@ def main(
     """
     Parâmetros
     ──────────
-    place                 
+    place                 : município para download do grafo OSM
     threshold             : distância de risco ao rio em metros
-    cluster_threshold_pct : percentil para classificar nós como isolados 
-    top_isolated          : número de nós isolados 
+    cluster_threshold_pct : percentil para classificar nós como isolados
+    top_isolated          : número de nós isolados a exibir
     """
 
-    # Grafo 
+    # Grafo
     G = build_graph(place)
     compute_network_metrics(G)
 
-    # Floyd-Warshall 
+    # Floyd-Warshall
     matrix, nodes = compute_fw_matrix(G)
     source, target, _, matrix, nodes = compute_diameter(G, matrix=matrix, nodes=nodes)
 
@@ -70,7 +76,7 @@ def main(
         filename="route_comparison.png",
     )
 
-    # Nós mais isolados 
+    # Nós mais isolados
     isolated_nodes, avg_dist = find_isolated_nodes(
         matrix, nodes,
         top_n=top_isolated,
@@ -79,8 +85,8 @@ def main(
 
     # Geocoding reverso dos nós isolados
     print("\n  Geocoding reverso dos nós isolados ")
-    iso_ids    = [n for n, _ in isolated_nodes]
-    locations  = geocode_nodes(G, iso_ids)
+    iso_ids = [n for n, _ in isolated_nodes]
+    locations = geocode_nodes(G, iso_ids)
     loc_by_node = {entry["node"]: entry for entry in locations}
 
     print(f"\n{'─' * 78}")
@@ -88,19 +94,18 @@ def main(
     print(f"{'─' * 78}")
     print(f"  {'Rank':>4}  {'Nó':>10}  {'Dist. média (km)':>16}  {'Lat':>10}  {'Lon':>11}  Endereço")
     for rank, (node, d) in enumerate(isolated_nodes, 1):
-        lat, lon = _utm_to_latlon(G, node)
-        address  = loc_by_node.get(node, {}).get("address", "—")
+        lat, lon = utm_to_latlon(G, node)
+        address = loc_by_node.get(node, {}).get("address", "—")
         print(f"  {rank:>4}  {node:>10}  {d / 1000:>16.3f}  {lat:>10.5f}  {lon:>11.5f}  {address}")
 
-    # Clustering hierárquico 
-    import numpy as np
+    # Clustering hierárquico
     finite_max = float(np.nanmax(matrix[matrix != np.inf]))
     matrix_vis = np.where(matrix == np.inf, finite_max * 1.2, matrix)
 
     labels, order, n_clusters = compute_hierarchical_clusters(matrix_vis, nodes)
     report_clusters(matrix_vis, nodes, labels, n_clusters, G=G)
 
-    # Heatmaps 
+    # Heatmaps
     plot_fw_heatmap(matrix, place_name=place, filename="fw_heatmap.png")
 
     plot_fw_heatmap_clustered(
@@ -116,11 +121,9 @@ def main(
     )
 
     # Demais análises
-    from routing import run_algorithms
     run_algorithms(G, source, target)
 
     plot_degree_distribution(G, filename="degree_distribution.png")
-    compute_betweenness(G)
 
 
 if __name__ == "__main__":
